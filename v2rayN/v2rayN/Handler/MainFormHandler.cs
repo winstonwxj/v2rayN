@@ -1,56 +1,109 @@
-﻿using System;
+﻿using Microsoft.Win32;
+using Splat;
 using System.Drawing;
-using System.Windows.Forms;
-using v2rayN.Base;
-using v2rayN.Mode;
+using System.IO;
+using System.Windows.Media.Imaging;
+using v2rayN.Enums;
+using v2rayN.Handler.CoreConfig;
+using v2rayN.Models;
+using v2rayN.Resx;
 
 namespace v2rayN.Handler
 {
-    class MainFormHandler
+    public sealed class MainFormHandler
     {
-        private static MainFormHandler instance;
-        Action<bool, string> updateUI;
+        private static readonly Lazy<MainFormHandler> instance = new(() => new());
+        public static MainFormHandler Instance => instance.Value;
 
-        //private DownloadHandle downloadHandle2;
-        //private Config _config;
-        //private V2rayHandler _v2rayHandler;
-        //private List<int> _selecteds;
-        //private Thread _workThread;
-        //Action<int, string> _updateFunc;
-        public static MainFormHandler Instance
-        {
-            get
-            {
-                if (instance == null)
-                {
-                    instance = new MainFormHandler();
-                }
-                return instance;
-            }
-        }
-
-        public Icon GetNotifyIcon(Config config, Icon def)
+        public Icon GetNotifyIcon(Config config)
         {
             try
             {
+                int index = (int)config.sysProxyType;
+
+                //Load from routing setting
+                var createdIcon = GetNotifyIcon4Routing(config);
+                if (createdIcon != null)
+                {
+                    return createdIcon;
+                }
+
+                //Load from local file
+                var fileName = Utils.GetPath($"NotifyIcon{index + 1}.ico");
+                if (File.Exists(fileName))
+                {
+                    return new Icon(fileName);
+                }
+                return index switch
+                {
+                    0 => Properties.Resources.NotifyIcon1,
+                    1 => Properties.Resources.NotifyIcon2,
+                    2 => Properties.Resources.NotifyIcon3,
+                    3 => Properties.Resources.NotifyIcon2,
+                    _ => Properties.Resources.NotifyIcon1, // default
+                };
+            }
+            catch (Exception ex)
+            {
+                Logging.SaveLog(ex.Message, ex);
+                return Properties.Resources.NotifyIcon1;
+            }
+        }
+
+        public System.Windows.Media.ImageSource GetAppIcon(Config config)
+        {
+            int index = 1;
+            switch (config.sysProxyType)
+            {
+                case ESysProxyType.ForcedClear:
+                    index = 1;
+                    break;
+
+                case ESysProxyType.ForcedChange:
+                case ESysProxyType.Pac:
+                    index = 2;
+                    break;
+
+                case ESysProxyType.Unchanged:
+                    index = 3;
+                    break;
+            }
+            return BitmapFrame.Create(new Uri($"pack://application:,,,/Resources/NotifyIcon{index}.ico", UriKind.RelativeOrAbsolute));
+        }
+
+        private Icon? GetNotifyIcon4Routing(Config config)
+        {
+            try
+            {
+                if (!config.routingBasicItem.enableRoutingAdvanced)
+                {
+                    return null;
+                }
+
+                var item = ConfigHandler.GetDefaultRouting(config);
+                if (item == null || Utils.IsNullOrEmpty(item.customIcon) || !File.Exists(item.customIcon))
+                {
+                    return null;
+                }
+
                 Color color = ColorTranslator.FromHtml("#3399CC");
                 int index = (int)config.sysProxyType;
                 if (index > 0)
                 {
-                    color = (new Color[] { Color.Red, Color.Purple, Color.DarkGreen, Color.Orange, Color.DarkSlateBlue, Color.RoyalBlue })[index - 1];
-                    //color = ColorTranslator.FromHtml(new string[] { "#CC0066", "#CC6600", "#99CC99", "#666699" }[index - 1]);
+                    color = (new[] { Color.Red, Color.Purple, Color.DarkGreen, Color.Orange, Color.DarkSlateBlue, Color.RoyalBlue })[index - 1];
                 }
 
                 int width = 128;
                 int height = 128;
 
-                Bitmap bitmap = new Bitmap(width, height);
+                Bitmap bitmap = new(width, height);
                 Graphics graphics = Graphics.FromImage(bitmap);
-                SolidBrush drawBrush = new SolidBrush(color);
+                SolidBrush drawBrush = new(color);
 
-                graphics.FillEllipse(drawBrush, new Rectangle(0, 0, width, height));
-                int zoom = 16;
-                graphics.DrawImage(new Bitmap(Properties.Resources.notify, width - zoom, width - zoom), zoom / 2, zoom / 2);
+                graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                //graphics.FillRectangle(drawBrush, new Rectangle(0, 0, width, height));
+                graphics.DrawImage(new Bitmap(item.customIcon), 0, 0, width, height);
+                graphics.FillEllipse(drawBrush, width / 2, width / 2, width / 2, width / 2);
 
                 Icon createdIcon = Icon.FromHandle(bitmap.GetHicon());
 
@@ -62,32 +115,30 @@ namespace v2rayN.Handler
             }
             catch (Exception ex)
             {
-                Utils.SaveLog(ex.Message, ex);
-                return def;
+                Logging.SaveLog(ex.Message, ex);
+                return null;
             }
         }
 
-        public void Export2ClientConfig(int index, Config config)
+        public void Export2ClientConfig(ProfileItem item, Config config)
         {
-            //int index = GetLvSelectedIndex();
-            if (index < 0)
+            if (item == null)
             {
                 return;
             }
-            if (config.vmess[index].configType != (int)EConfigType.Vmess
-                && config.vmess[index].configType != (int)EConfigType.VLESS)
+            if (item.configType == EConfigType.Custom)
             {
-                UI.Show(UIRes.I18N("NonVmessService"));
+                Locator.Current.GetService<NoticeHandler>()?.Enqueue(ResUI.NonVmessService);
                 return;
             }
 
-            SaveFileDialog fileDialog = new SaveFileDialog
+            SaveFileDialog fileDialog = new()
             {
                 Filter = "Config|*.json",
                 FilterIndex = 2,
                 RestoreDirectory = true
             };
-            if (fileDialog.ShowDialog() != DialogResult.OK)
+            if (fileDialog.ShowDialog() != true)
             {
                 return;
             }
@@ -96,146 +147,86 @@ namespace v2rayN.Handler
             {
                 return;
             }
-            Config configCopy = Utils.DeepCopy(config);
-            configCopy.index = index;
-            if (V2rayConfigHandler.Export2ClientConfig(configCopy, fileName, out string msg) != 0)
+            if (CoreConfigHandler.GenerateClientConfig(item, fileName, out string msg, out string content) != 0)
             {
-                UI.Show(msg);
+                Locator.Current.GetService<NoticeHandler>()?.Enqueue(msg);
             }
             else
             {
-                UI.ShowWarning(string.Format(UIRes.I18N("SaveClientConfigurationIn"), fileName));
+                msg = string.Format(ResUI.SaveClientConfigurationIn, fileName);
+                Locator.Current.GetService<NoticeHandler>()?.SendMessageAndEnqueue(msg);
             }
         }
 
-        public void Export2ServerConfig(int index, Config config)
+        public void UpdateTask(Config config, Action<bool, string> update)
         {
-            //int index = GetLvSelectedIndex();
-            if (index < 0)
-            {
-                return;
-            }
-            if (config.vmess[index].configType != (int)EConfigType.Vmess
-                && config.vmess[index].configType != (int)EConfigType.VLESS)
-            {
-                UI.Show(UIRes.I18N("NonVmessService"));
-                return;
-            }
-
-            SaveFileDialog fileDialog = new SaveFileDialog
-            {
-                Filter = "Config|*.json",
-                FilterIndex = 2,
-                RestoreDirectory = true
-            };
-            if (fileDialog.ShowDialog() != DialogResult.OK)
-            {
-                return;
-            }
-            string fileName = fileDialog.FileName;
-            if (Utils.IsNullOrEmpty(fileName))
-            {
-                return;
-            }
-            Config configCopy = Utils.DeepCopy(config);
-            configCopy.index = index;
-            if (V2rayConfigHandler.Export2ServerConfig(configCopy, fileName, out string msg) != 0)
-            {
-                UI.Show(msg);
-            }
-            else
-            {
-                UI.ShowWarning(string.Format(UIRes.I18N("SaveServerConfigurationIn"), fileName));
-            }
+            Task.Run(() => UpdateTaskRunSubscription(config, update));
+            Task.Run(() => UpdateTaskRunGeo(config, update));
         }
 
-        public int AddBatchServers(Config config, string clipboardData, string subid = "")
+        private async Task UpdateTaskRunSubscription(Config config, Action<bool, string> update)
         {
-            int counter;
-            int _Add()
+            await Task.Delay(60000);
+            Logging.SaveLog("UpdateTaskRunSubscription");
+
+            var updateHandle = new UpdateHandle();
+            while (true)
             {
-                return ConfigHandler.AddBatchServers(ref config, clipboardData, subid);
-            }
-            counter = _Add();
-            if (counter < 1)
-            {
-                clipboardData = Utils.Base64Decode(clipboardData);
-                counter = _Add();
-            }
+                var updateTime = ((DateTimeOffset)DateTime.Now).ToUnixTimeSeconds();
+                var lstSubs = LazyConfig.Instance.SubItems()
+                            .Where(t => t.autoUpdateInterval > 0)
+                            .Where(t => updateTime - t.updateTime >= t.autoUpdateInterval * 60)
+                            .ToList();
 
-            return counter;
-        }
-
-
-        public void UpdateSubscriptionProcess(Config config, Action<bool, string> update)
-        {
-            updateUI = update;
-
-            updateUI(false, UIRes.I18N("MsgUpdateSubscriptionStart"));
-
-            if (config.subItem == null || config.subItem.Count <= 0)
-            {
-                updateUI(false, UIRes.I18N("MsgNoValidSubscription"));
-                return;
-            }
-
-            for (int k = 1; k <= config.subItem.Count; k++)
-            {
-                string id = config.subItem[k - 1].id.TrimEx();
-                string url = config.subItem[k - 1].url.TrimEx();
-                string hashCode = $"{k}->";
-                if (config.subItem[k - 1].enabled == false)
+                foreach (var item in lstSubs)
                 {
-                    continue;
+                    updateHandle.UpdateSubscriptionProcess(config, item.id, true, (bool success, string msg) =>
+                    {
+                        update(success, msg);
+                        if (success)
+                            Logging.SaveLog("subscription" + msg);
+                    });
+                    item.updateTime = updateTime;
+                    ConfigHandler.AddSubItem(config, item);
+
+                    await Task.Delay(5000);
                 }
-                if (Utils.IsNullOrEmpty(id) || Utils.IsNullOrEmpty(url))
+                await Task.Delay(60000);
+            }
+        }
+
+        private async Task UpdateTaskRunGeo(Config config, Action<bool, string> update)
+        {
+            var autoUpdateGeoTime = DateTime.Now;
+
+            await Task.Delay(1000 * 120);
+            Logging.SaveLog("UpdateTaskRunGeo");
+
+            var updateHandle = new UpdateHandle();
+            while (true)
+            {
+                var dtNow = DateTime.Now;
+                if (config.guiItem.autoUpdateInterval > 0)
                 {
-                    updateUI(false, $"{hashCode}{UIRes.I18N("MsgNoValidSubscription")}");
-                    continue;
+                    if ((dtNow - autoUpdateGeoTime).Hours % config.guiItem.autoUpdateInterval == 0)
+                    {
+                        updateHandle.UpdateGeoFileAll(config, (bool success, string msg) =>
+                        {
+                            update(false, msg);
+                        });
+                        autoUpdateGeoTime = dtNow;
+                    }
                 }
 
-                DownloadHandle downloadHandle3 = new DownloadHandle();
-                downloadHandle3.UpdateCompleted += (sender2, args) =>
-                {
-                    if (args.Success)
-                    {
-                        updateUI(false, $"{hashCode}{UIRes.I18N("MsgGetSubscriptionSuccessfully")}");
-                        string result = Utils.Base64Decode(args.Msg);
-                        if (Utils.IsNullOrEmpty(result))
-                        {
-                            updateUI(false, $"{hashCode}{UIRes.I18N("MsgSubscriptionDecodingFailed")}");
-                            return;
-                        }
-
-                        ConfigHandler.RemoveServerViaSubid(ref config, id);
-                        updateUI(false, $"{hashCode}{UIRes.I18N("MsgClearSubscription")}");
-                        //  RefreshServers();
-                        int ret = MainFormHandler.Instance.AddBatchServers(config, result, id);
-                        if (ret > 0)
-                        {
-                            // RefreshServers();
-                        }
-                        else
-                        {
-                            updateUI(false, $"{hashCode}{UIRes.I18N("MsgFailedImportSubscription")}");
-                        }
-                        updateUI(true, $"{hashCode}{UIRes.I18N("MsgUpdateSubscriptionEnd")}");
-                    }
-                    else
-                    {
-                        updateUI(false, args.Msg);
-                    }
-                };
-                downloadHandle3.Error += (sender2, args) =>
-                {
-                    updateUI(false, args.GetException().Message);
-                };
-
-                downloadHandle3.WebDownloadString(url);
-                updateUI(false, $"{hashCode}{UIRes.I18N("MsgStartGettingSubscriptions")}");
+                await Task.Delay(1000 * 3600);
             }
-
         }
 
+        public void RegisterGlobalHotkey(Config config, Action<EGlobalHotkey> handler, Action<bool, string> update)
+        {
+            HotkeyHandler.Instance.UpdateViewEvent += update;
+            HotkeyHandler.Instance.HotkeyTriggerEvent += handler;
+            HotkeyHandler.Instance.Load();
+        }
     }
 }
